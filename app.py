@@ -9,7 +9,7 @@ import plotly.express as px
 # ==========================================
 st.set_page_config(page_title="Amazon MTR Master", page_icon="📦", layout="wide")
 
-PASSWORD = "kamal_mtramazon" # <--- Change password here
+PASSWORD = "kressa_admin" # <--- Change password here
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -81,7 +81,6 @@ def apply_regional_logic(row):
     region = 'Unmapped'
     final_state = state
 
-    # Regional & Zone Mapping: UP Zone B moved to Region 4
     if state == 'UTTAR PRADESH':
         if any(up_city in city for up_city in up_zone_b_cities):
             final_state = 'Uttar Pradesh Zone B'
@@ -95,99 +94,118 @@ def apply_regional_logic(row):
     
     return final_state, region
 
+def process_month_data(b2b_file, b2c_file):
+    """Helper to process a pair of ZIP files (B2B + B2C) into a clean DataFrame."""
+    if not b2b_file or not b2c_file:
+        return None
+    
+    b2b_df = read_csv_from_zip_buffer(b2b_file)
+    b2c_df = read_csv_from_zip_buffer(b2c_file)
+    
+    if b2b_df is None or b2c_df is None:
+        return None
+        
+    b2b_df['Channel'] = 'B2B'
+    b2c_df['Channel'] = 'B2C'
+    df = pd.concat([b2b_df, b2c_df], ignore_index=True)
+    df.columns = df.columns.str.strip()
+
+    # Cleaning
+    df['Revenue'] = pd.to_numeric(df['Tax Exclusive Gross'], errors='coerce').fillna(0)
+    df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0)
+    df.loc[df['Transaction Type'].str.contains('Cancel', case=False, na=False), 'Quantity'] = 0
+    
+    # Logic
+    df['Brand'] = df['Item Description'].apply(extract_brand)
+    df[['Final State', 'Region']] = df.apply(lambda row: pd.Series(apply_regional_logic(row)), axis=1)
+    
+    return df
+
 # ==========================================
 # 3. APP UI & EXECUTION
 # ==========================================
 st.title("📦 Amazon MTR Consolidated Master")
-st.markdown("Upload your B2B and B2C ZIP files to generate the consolidated report.")
+st.markdown("Upload raw ZIP files for both **Current Month** and **Previous Month** to generate a comparison report.")
 
 # Sidebar Uploads
-st.sidebar.header("📂 Data Upload")
-b2b_file = st.sidebar.file_uploader("B2B Report (ZIP)", type=['zip'])
-b2c_file = st.sidebar.file_uploader("B2C Report (ZIP)", type=['zip'])
-prev_file = st.sidebar.file_uploader("Previous Month Master (Excel) - Optional", type=['xlsx'])
+st.sidebar.header("📅 Current Month Data")
+curr_b2b = st.sidebar.file_uploader("Current B2B (ZIP)", type=['zip'], key="curr_b2b")
+curr_b2c = st.sidebar.file_uploader("Current B2C (ZIP)", type=['zip'], key="curr_b2c")
+
+st.sidebar.header("⏮️ Previous Month Data")
+prev_b2b = st.sidebar.file_uploader("Previous B2B (ZIP)", type=['zip'], key="prev_b2b")
+prev_b2c = st.sidebar.file_uploader("Previous B2C (ZIP)", type=['zip'], key="prev_b2c")
 
 if st.sidebar.button("🔴 Logout"):
     st.session_state.authenticated = False
     st.rerun()
 
-if b2b_file and b2c_file:
-    with st.spinner('Extracting and Processing Data...'):
-        # 1. Load Data
-        b2b_df = read_csv_from_zip_buffer(b2b_file)
-        b2c_df = read_csv_from_zip_buffer(b2c_file)
+if curr_b2b and curr_b2c:
+    with st.spinner('Processing Data...'):
+        
+        # 1. Process Current Month
+        curr_df = process_month_data(curr_b2b, curr_b2c)
+        
+        # 2. Process Previous Month (If uploaded)
+        prev_df = process_month_data(prev_b2b, prev_b2c)
 
-        if b2b_df is not None and b2c_df is not None:
-            # 2. Combine & Clean
-            b2b_df['Channel'] = 'B2B'
-            b2c_df['Channel'] = 'B2C'
-            combined_df = pd.concat([b2b_df, b2c_df], ignore_index=True)
-            combined_df.columns = combined_df.columns.str.strip()
-
-            # Numeric Conversion
-            combined_df['Revenue'] = pd.to_numeric(combined_df['Tax Exclusive Gross'], errors='coerce').fillna(0)
-            combined_df['Quantity'] = pd.to_numeric(combined_df['Quantity'], errors='coerce').fillna(0)
-            
-            # Handle Cancellations
-            combined_df.loc[combined_df['Transaction Type'].str.contains('Cancel', case=False, na=False), 'Quantity'] = 0
-            
-            # Apply Logic
-            combined_df['Brand'] = combined_df['Item Description'].apply(extract_brand)
-            combined_df[['Final State', 'Region']] = combined_df.apply(lambda row: pd.Series(apply_regional_logic(row)), axis=1)
-
-            # Reorder Columns
-            cols = list(combined_df.columns)
+        if curr_df is not None:
+            # Reorder Columns for Final Output
+            cols = list(curr_df.columns)
             if 'Ship To State' in cols and 'Region' in cols:
                 cols.remove('Region')
                 state_idx = cols.index('Ship To State')
                 cols.insert(state_idx + 1, 'Region')
-                combined_df = combined_df[cols]
+                curr_df = curr_df[cols]
 
-            # 3. Previous Month Comparison Logic
-            curr_prods = combined_df.groupby('Item Description').agg({
+            # 3. Comparison Logic
+            curr_prods = curr_df.groupby('Item Description').agg({
                 'Revenue': 'sum', 'Quantity': 'sum'
             }).rename(columns={'Revenue': 'Curr Revenue', 'Quantity': 'Curr Units'})
 
             comparison_available = False
             top_products_data = curr_prods # Default
 
-            if prev_file:
-                try:
-                    prev_all_df = pd.read_excel(prev_file, sheet_name='All Products')
-                    if not prev_all_df.empty:
-                        prev_prods = prev_all_df.groupby('Item Description').agg({
-                            'Revenue': 'sum', 'Quantity': 'sum'
-                        }).rename(columns={'Revenue': 'Prev Revenue', 'Quantity': 'Prev Units'})
-                        
-                        comparison = curr_prods.join(prev_prods, how='left').fillna(0)
-                        
-                        # Trend Logic
-                        def get_trend(curr, prev):
-                            if prev == 0: return "★ New"
-                            if curr > prev: return "▲ Up"
-                            if curr < prev: return "▼ Down"
-                            return "▬ Neutral"
+            if prev_df is not None:
+                prev_prods = prev_df.groupby('Item Description').agg({
+                    'Revenue': 'sum', 'Quantity': 'sum'
+                }).rename(columns={'Revenue': 'Prev Revenue', 'Quantity': 'Prev Units'})
+                
+                comparison = curr_prods.join(prev_prods, how='left').fillna(0)
+                
+                # Trend Logic
+                def get_trend(curr, prev):
+                    if prev == 0: return "★ New"
+                    if curr > prev: return "▲ Up"
+                    if curr < prev: return "▼ Down"
+                    return "▬ Neutral"
 
-                        comparison['Revenue Trend'] = comparison.apply(lambda x: get_trend(x['Curr Revenue'], x['Prev Revenue']), axis=1)
-                        comparison['Units Trend'] = comparison.apply(lambda x: get_trend(x['Curr Units'], x['Prev Units']), axis=1)
-                        
-                        top_products_data = comparison[['Curr Revenue', 'Prev Revenue', 'Revenue Trend', 'Curr Units', 'Prev Units', 'Units Trend']]
-                        comparison_available = True
-                        st.success("✅ Previous Month Comparison Applied!")
-                except Exception as e:
-                    st.warning(f"⚠️ Could not load Previous Month file (Check sheet name 'All Products'): {e}")
+                comparison['Revenue Trend'] = comparison.apply(lambda x: get_trend(x['Curr Revenue'], x['Prev Revenue']), axis=1)
+                comparison['Units Trend'] = comparison.apply(lambda x: get_trend(x['Curr Units'], x['Prev Units']), axis=1)
+                
+                top_products_data = comparison[['Curr Revenue', 'Prev Revenue', 'Revenue Trend', 'Curr Units', 'Prev Units', 'Units Trend']]
+                comparison_available = True
+                st.success("✅ Comparison Generated Successfully!")
+            else:
+                st.info("ℹ️ Previous month files not uploaded. Generating Single Month Report.")
 
             # ==========================================
             # 4. DASHBOARD VISUALS
             # ==========================================
-            total_rev = combined_df['Revenue'].sum()
-            total_qty = combined_df['Quantity'].sum()
+            total_rev = curr_df['Revenue'].sum()
+            total_qty = curr_df['Quantity'].sum()
             
+            # Growth Metrics
+            growth_delta = None
+            if prev_df is not None:
+                prev_rev = prev_df['Revenue'].sum()
+                growth_delta = f"{(total_rev - prev_rev):,.0f} vs Last Month"
+
             st.markdown("### 📊 Executive Summary")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Revenue", f"₹{total_rev:,.0f}")
+            c1.metric("Total Revenue", f"₹{total_rev:,.0f}", delta=growth_delta)
             c2.metric("Total Units", f"{total_qty:,.0f}")
-            c3.metric("B2B vs B2C Split", f"{len(b2b_df)} / {len(b2c_df)} Orders")
+            c3.metric("B2B vs B2C Split", f"{len(curr_df[curr_df['Channel']=='B2B'])} / {len(curr_df[curr_df['Channel']=='B2C'])} Orders")
             
             st.divider()
             
@@ -196,18 +214,18 @@ if b2b_file and b2c_file:
             
             with g1:
                 st.subheader("🌍 Revenue by Region")
-                reg_data = combined_df.groupby('Region')['Revenue'].sum().reset_index()
-                fig_reg = px.bar(reg_data, x='Region', y='Revenue', color='Region', text_auto='.2s', title="Regional Performance")
+                reg_data = curr_df.groupby('Region')['Revenue'].sum().reset_index()
+                fig_reg = px.bar(reg_data, x='Region', y='Revenue', color='Region', text_auto='.2s')
                 st.plotly_chart(fig_reg, use_container_width=True)
                 
             with g2:
                 st.subheader("🥧 Brand Share")
-                brand_data = combined_df.groupby('Brand')['Revenue'].sum().reset_index()
-                fig_brand = px.pie(brand_data, values='Revenue', names='Brand', title="Revenue Share by Brand", hole=0.4)
+                brand_data = curr_df.groupby('Brand')['Revenue'].sum().reset_index()
+                fig_brand = px.pie(brand_data, values='Revenue', names='Brand', hole=0.4)
                 st.plotly_chart(fig_brand, use_container_width=True)
 
             st.subheader("🏆 Top 10 Products")
-            top_10 = combined_df.groupby('Item Description')['Revenue'].sum().nlargest(10).reset_index()
+            top_10 = curr_df.groupby('Item Description')['Revenue'].sum().nlargest(10).reset_index()
             fig_top = px.bar(top_10, x='Revenue', y='Item Description', orientation='h', text_auto='.2s')
             fig_top.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_top, use_container_width=True)
@@ -223,14 +241,14 @@ if b2b_file and b2c_file:
             money_fmt = workbook.add_format({'num_format': '₹#,##0'})
             green_fmt = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100', 'bold': True})
 
-            # Sheet 1: Combined Data
-            combined_df.to_excel(writer, sheet_name='Combined Data', index=False)
+            # Sheet 1: Combined Data (Current)
+            curr_df.to_excel(writer, sheet_name='Combined Data', index=False)
             
             # Sheet 2: Regional Dashboard
-            combined_df.groupby('Region').agg({'Revenue': 'sum', 'Quantity': 'sum', 'Sku': 'nunique'}).to_excel(writer, sheet_name='Regional Dashboard')
+            curr_df.groupby('Region').agg({'Revenue': 'sum', 'Quantity': 'sum', 'Sku': 'nunique'}).to_excel(writer, sheet_name='Regional Dashboard')
             
             # Sheet 3: Regional Brand Share
-            combined_df.groupby(['Region', 'Brand']).agg({'Revenue': 'sum', 'Quantity': 'sum'}).unstack(fill_value=0).to_excel(writer, sheet_name='Regional Brand Share')
+            curr_df.groupby(['Region', 'Brand']).agg({'Revenue': 'sum', 'Quantity': 'sum'}).unstack(fill_value=0).to_excel(writer, sheet_name='Regional Brand Share')
 
             # Sheet 4: Top Products
             top_products_data.sort_values('Curr Revenue', ascending=False).head(20).to_excel(writer, sheet_name='Top Products')
@@ -238,7 +256,7 @@ if b2b_file and b2c_file:
                 writer.sheets['Top Products'].set_column('B:C', 15, money_fmt)
 
             # Sheet 5: All Products
-            all_prods = combined_df.groupby(['Brand', 'Sku', 'Item Description']).agg({'Revenue': 'sum', 'Quantity': 'sum'}).reset_index()
+            all_prods = curr_df.groupby(['Brand', 'Sku', 'Item Description']).agg({'Revenue': 'sum', 'Quantity': 'sum'}).reset_index()
             all_prods = all_prods.sort_values(['Brand', 'Revenue'], ascending=[True, False])
             all_prods.to_excel(writer, sheet_name='All Products', index=False)
             
@@ -257,4 +275,4 @@ if b2b_file and b2c_file:
             )
 
 else:
-    st.info("👈 Please upload B2B and B2C ZIP files to begin analysis.")
+    st.info("👈 Please upload at least the **Current Month** ZIP files to begin.")
