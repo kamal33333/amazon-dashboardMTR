@@ -9,7 +9,7 @@ import plotly.express as px
 # ==========================================
 st.set_page_config(page_title="Amazon MTR Master", page_icon="📦", layout="wide")
 
-PASSWORD = "kressa_admin" # <--- Change password here
+PASSWORD = "kamal_mtramazon" # <--- Change password here
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
