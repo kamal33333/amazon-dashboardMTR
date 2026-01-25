@@ -22,8 +22,10 @@ if "authenticated" not in st.session_state:
 def check_password():
     if st.session_state.authenticated:
         return True
+    
+    # --- FIXED LINE BELOW ---
     c1, c2, c3 = st.columns([1,2,1])
-    with col2:
+    with c2:  # <--- Changed from col2 to c2
         st.title("🔒 Amazon AI Analyst Login")
         pwd = st.text_input("Enter Password", type="password")
         if st.button("Login"):
@@ -38,7 +40,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 2. HELPER FUNCTIONS (Logic from your script)
+# 2. HELPER FUNCTIONS
 # ==========================================
 
 def parse_file_info(filename):
