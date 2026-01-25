@@ -6,13 +6,13 @@ import re
 import numpy as np
 import calendar
 from datetime import datetime
-from scipy.stats import linregress
 import plotly.express as px
+import plotly.graph_objects as go
 
 # ==========================================
 # 1. CONFIG & AUTH
 # ==========================================
-st.set_page_config(page_title="Amazon AI Analyst", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Amazon Management HQ", page_icon="📈", layout="wide")
 
 PASSWORD = "kressa_admin" 
 
@@ -23,10 +23,9 @@ def check_password():
     if st.session_state.authenticated:
         return True
     
-    # --- FIXED LINE BELOW ---
     c1, c2, c3 = st.columns([1,2,1])
-    with c2:  # <--- Changed from col2 to c2
-        st.title("🔒 Amazon AI Analyst Login")
+    with c2:
+        st.title("🔒 Amazon HQ Login")
         pwd = st.text_input("Enter Password", type="password")
         if st.button("Login"):
             if pwd == PASSWORD:
@@ -40,7 +39,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 2. HELPER FUNCTIONS
+# 2. DATA PROCESSING ENGINE
 # ==========================================
 
 def parse_file_info(filename):
@@ -113,48 +112,19 @@ def apply_regional_logic(row):
     elif state in r4: region = 'Region 4'
     return final_state, region
 
-def get_trend_slope(series):
-    y = series.values; mask = ~np.isnan(y); y = y[mask]
-    if len(y) < 2: return 0
-    slope, _, _, _, _ = linregress(np.arange(len(y)), y)
-    return slope
-
-def calculate_advanced_stats(df_pivot, latest_month_factor=1.0):
-    month_cols = df_pivot.columns.tolist()
-    curr_col = month_cols[-1]
-    analysis_df = df_pivot[month_cols].copy()
-    if latest_month_factor > 1.05:
-        analysis_df[curr_col] = analysis_df[curr_col] * latest_month_factor
-        
-    df_pivot['Average'] = analysis_df.mean(axis=1)
-    df_pivot['Std_Dev'] = analysis_df.std(axis=1).fillna(0)
-    df_pivot['Trend_Score'] = analysis_df.apply(get_trend_slope, axis=1)
-    
-    prev_col = month_cols[-2] if len(month_cols) > 1 else month_cols[-1]
-    df_pivot['Growth %'] = ((analysis_df[curr_col] - df_pivot[prev_col]) / df_pivot[prev_col].replace(0, 1))
-    df_pivot['Z_Score'] = ((analysis_df[curr_col] - df_pivot['Average']) / df_pivot['Std_Dev']).replace([np.inf, -np.inf], 0).fillna(0)
-    if latest_month_factor > 1.0:
-        df_pivot[f'Projected {curr_col}'] = df_pivot[curr_col] * latest_month_factor
-    return df_pivot, month_cols
-
 # ==========================================
-# 3. MAIN APP INTERFACE
+# 3. UI & FILE HANDLING
 # ==========================================
-st.title("🤖 Amazon AI Report Generator")
-st.markdown("""
-### Instructions:
-1. Select **ALL** your ZIP files from your folder (Jan, Feb, Mar... etc).
-2. Drag and drop them into the box below.
-3. The AI will sort them by date automatically.
-""")
+st.title("📈 Amazon Management HQ")
+st.markdown("Upload monthly ZIP files to generate the **Executive Business Review**.")
 
-uploaded_files = st.file_uploader("Upload Monthly ZIPs (B2B & B2C)", type=['zip'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Drop All Monthly ZIPs Here", type=['zip'], accept_multiple_files=True)
 
-if uploaded_files and st.button("🚀 Run AI Analysis"):
+if uploaded_files and st.button("🚀 Generate Management Report"):
     
-    # --- 1. ORGANIZE FILES ---
+    # --- 1. FILE ORG ---
     files_map = {}
-    with st.spinner("Sorting and organizing files..."):
+    with st.spinner("Organizing timeline..."):
         for uploaded_file in uploaded_files:
             date_obj, channel = parse_file_info(uploaded_file.name)
             if date_obj and channel:
@@ -163,169 +133,194 @@ if uploaded_files and st.button("🚀 Run AI Analysis"):
                 files_map[date_obj][channel] = uploaded_file
 
         sorted_files = sorted(files_map.values(), key=lambda x: x['date'])
-        
         if not sorted_files:
-            st.error("No valid B2B/B2C dated files found.")
+            st.error("No valid dated files found.")
             st.stop()
-        
-        st.success(f"📅 Identified {len(sorted_files)} Months of data from {sorted_files[0]['date'].strftime('%b-%Y')} to {sorted_files[-1]['date'].strftime('%b-%Y')}")
 
-    # --- 2. LOAD DATA ---
+    # --- 2. LOAD & STITCH ---
     all_dfs = []
-    projection_factor = 1.0
     now = datetime.now()
-    
-    progress_bar = st.progress(0)
-    
-    with st.spinner("Parsing CSVs and stitching data..."):
-        for i, m_data in enumerate(sorted_files):
-            month_name = m_data['date'].strftime('%b-%Y')
-            b2b = read_csv_from_uploaded_zip(m_data['B2B']) if m_data['B2B'] else None
-            b2c = read_csv_from_uploaded_zip(m_data['B2C']) if m_data['B2C'] else None
-            
-            if b2b is not None and b2c is not None:
-                b2b['Channel'] = 'B2B'; b2c['Channel'] = 'B2C'
-                curr_df = pd.concat([b2b, b2c], ignore_index=True)
-                curr_df.columns = curr_df.columns.str.strip()
-                
-                # Cleanup
-                curr_df['Revenue'] = pd.to_numeric(curr_df['Tax Exclusive Gross'], errors='coerce').fillna(0)
-                curr_df['Quantity'] = pd.to_numeric(curr_df['Quantity'], errors='coerce').fillna(0)
-                curr_df.loc[curr_df['Transaction Type'].str.contains('Cancel', case=False, na=False), 'Quantity'] = 0
-                
-                # Projection Logic
-                if i == len(sorted_files) - 1:
-                    is_current_month = (m_data['date'].year == now.year) and (m_data['date'].month == now.month)
-                    if is_current_month:
-                        date_col = 'Invoice Date' if 'Invoice Date' in curr_df.columns else 'Order Date'
-                        if date_col in curr_df.columns:
-                            curr_df['Parsed_Date'] = pd.to_datetime(curr_df[date_col], dayfirst=True, errors='coerce')
-                            max_date = curr_df['Parsed_Date'].max()
-                            if pd.notnull(max_date):
-                                days_in_data = max_date.day
-                                _, days_in_month = calendar.monthrange(max_date.year, max_date.month)
-                                if days_in_data < days_in_month and days_in_data > 0:
-                                    projection_factor = days_in_month / days_in_data
-                                    st.info(f"⚠️ Partial Month Detected ({month_name}): Extrapolating x{projection_factor:.2f}")
+    proj_factors = {} # Store projection factor per month
 
-                curr_df['Month_Year'] = month_name
-                curr_df['Brand'] = curr_df['Item Description'].apply(extract_brand)
-                all_dfs.append(curr_df)
-            
-            progress_bar.progress((i + 1) / len(sorted_files))
-
-    if not all_dfs:
-        st.error("No valid data could be processed.")
-        st.stop()
+    progress = st.progress(0)
+    for i, m_data in enumerate(sorted_files):
+        month_name = m_data['date'].strftime('%b-%Y')
+        b2b = read_csv_from_uploaded_zip(m_data['B2B']) if m_data['B2B'] else None
+        b2c = read_csv_from_uploaded_zip(m_data['B2C']) if m_data['B2C'] else None
         
+        if b2b is not None and b2c is not None:
+            b2b['Channel'] = 'B2B'; b2c['Channel'] = 'B2C'
+            curr_df = pd.concat([b2b, b2c], ignore_index=True)
+            curr_df.columns = curr_df.columns.str.strip()
+            
+            # Clean
+            curr_df['Revenue'] = pd.to_numeric(curr_df['Tax Exclusive Gross'], errors='coerce').fillna(0)
+            curr_df['Quantity'] = pd.to_numeric(curr_df['Quantity'], errors='coerce').fillna(0)
+            curr_df.loc[curr_df['Transaction Type'].str.contains('Cancel', case=False, na=False), 'Quantity'] = 0
+            
+            # Partial Month Logic
+            factor = 1.0
+            if i == len(sorted_files) - 1: # Only check last month
+                is_curr = (m_data['date'].year == now.year) and (m_data['date'].month == now.month)
+                if is_curr:
+                    date_col = 'Invoice Date' if 'Invoice Date' in curr_df.columns else 'Order Date'
+                    if date_col in curr_df.columns:
+                        curr_df['Parsed_Date'] = pd.to_datetime(curr_df[date_col], dayfirst=True, errors='coerce')
+                        max_d = curr_df['Parsed_Date'].max()
+                        if pd.notnull(max_d):
+                            days_in_data = max_d.day
+                            _, days_in_month = calendar.monthrange(max_d.year, max_d.month)
+                            if days_in_data < days_in_month and days_in_data > 0:
+                                factor = days_in_month / days_in_data
+            
+            proj_factors[month_name] = factor
+            curr_df['Revenue_Projected'] = curr_df['Revenue'] * factor
+            curr_df['Month_Year'] = month_name
+            curr_df['Sort_Date'] = m_data['date']
+            curr_df['Brand'] = curr_df['Item Description'].apply(extract_brand)
+            all_dfs.append(curr_df)
+        progress.progress((i + 1) / len(sorted_files))
+    
+    if not all_dfs:
+        st.error("Processing failed.")
+        st.stop()
+
     master_df = pd.concat(all_dfs, ignore_index=True)
     master_df[['Final State', 'Region']] = master_df.apply(lambda row: pd.Series(apply_regional_logic(row)), axis=1)
-    master_df['Ship To City'] = master_df['Ship To City'].astype(str).str.upper().str.strip()
 
-    # --- 3. CALCULATIONS ---
-    def create_stat_sheet(groupby_cols, value_col='Revenue'):
-        grouped = master_df.groupby(groupby_cols + ['Month_Year'])[value_col].sum().reset_index()
-        pivoted = grouped.pivot_table(index=groupby_cols, columns='Month_Year', values=value_col, aggfunc='sum').fillna(0)
-        # Ensure proper time sorting
-        sorted_cols = [m['date'].strftime('%b-%Y') for m in sorted_files if m['date'].strftime('%b-%Y') in pivoted.columns]
-        pivoted = pivoted[sorted_cols]
-        stats_df, _ = calculate_advanced_stats(pivoted, latest_month_factor=projection_factor)
-        return stats_df.sort_values(sorted_cols[-1], ascending=False)
-
-    region_stats = create_stat_sheet(['Region'])
-    state_stats = create_stat_sheet(['Final State'])
-    city_stats = create_stat_sheet(['Final State', 'Ship To City'])
-    product_stats = create_stat_sheet(['Brand', 'Sku', 'Item Description'])
+    # ==========================================
+    # 4. DASHBOARD TABS
+    # ==========================================
     
-    # AI Insights
-    latest_month = sorted_files[-1]['date'].strftime('%b-%Y')
-    prev_month = sorted_files[-2]['date'].strftime('%b-%Y') if len(sorted_files) > 1 else latest_month
-    
-    insights_list = []
-    # 1. Lost Territory
-    lost = city_stats[(city_stats[latest_month] == 0) & (city_stats['Average'] > 1000)]
-    for idx, row in lost.iterrows():
-        insights_list.append({'Type': '🚨 Lost Territory', 'Entity': str(idx[1]), 'Note': f"Avg ₹{int(row['Average'])} -> 0"})
-    # 2. Breakouts
-    breakouts = product_stats[product_stats['Z_Score'] > 2.0]
-    for idx, row in breakouts.head(5).iterrows():
-        insights_list.append({'Type': '🔥 Breakout', 'Entity': str(idx[2])[:40], 'Note': f"Z-Score: {round(row['Z_Score'], 2)}"})
-    
-    ai_df = pd.DataFrame(insights_list)
-
-    # --- 4. VISUALS ---
     st.divider()
-    st.header("📊 Executive Overview")
     
-    # Time Series Chart
-    time_data = master_df.groupby('Month_Year')['Revenue'].sum().reindex(
-        [m['date'].strftime('%b-%Y') for m in sorted_files]
-    ).reset_index()
+    # --- TAB 1: EXECUTIVE TRENDS ---
+    st.header(f"📊 Executive Summary ({len(sorted_files)} Months)")
     
-    fig_trend = px.line(time_data, x='Month_Year', y='Revenue', markers=True, title="Revenue Trend (YTD)")
+    # 1. B2B vs B2C Trend Stacked Bar
+    trend_data = master_df.groupby(['Month_Year', 'Channel', 'Sort_Date'])['Revenue_Projected'].sum().reset_index()
+    trend_data = trend_data.sort_values('Sort_Date')
+    
+    fig_trend = px.bar(
+        trend_data, x='Month_Year', y='Revenue_Projected', color='Channel', 
+        title="Monthly Revenue Trend (B2B vs B2C)", text_auto='.2s',
+        color_discrete_map={'B2B': '#1f77b4', 'B2C': '#ff7f0e'}
+    )
     st.plotly_chart(fig_trend, use_container_width=True)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Regional Performance")
-        st.dataframe(region_stats.style.format("₹{0:,.0f}"), use_container_width=True)
-    with c2:
-        if not ai_df.empty:
-            st.subheader("🤖 AI Insights")
-            st.dataframe(ai_df, use_container_width=True)
-        else:
-            st.info("No anomalies detected by AI this month.")
+    # 2. Key Metrics Table (MoM)
+    monthly_metrics = master_df.groupby(['Sort_Date', 'Month_Year']).agg(
+        Total_Revenue=('Revenue', 'sum'),
+        Projected_Revenue=('Revenue_Projected', 'sum'),
+        Total_Units=('Quantity', 'sum'),
+        Orders=('Revenue', 'count')
+    ).reset_index()
+    
+    monthly_metrics['AOV'] = monthly_metrics['Total_Revenue'] / monthly_metrics['Orders']
+    monthly_metrics['MoM Growth'] = monthly_metrics['Total_Revenue'].pct_change() * 100
+    
+    # Format for display
+    display_metrics = monthly_metrics[['Month_Year', 'Total_Revenue', 'Projected_Revenue', 'Total_Units', 'AOV', 'MoM Growth']].copy()
+    display_metrics['Total_Revenue'] = display_metrics['Total_Revenue'].map('₹{:,.0f}'.format)
+    display_metrics['Projected_Revenue'] = display_metrics['Projected_Revenue'].map('₹{:,.0f}'.format)
+    display_metrics['AOV'] = display_metrics['AOV'].map('₹{:,.0f}'.format)
+    display_metrics['MoM Growth'] = display_metrics['MoM Growth'].map('{:+.1f}%'.format).replace('nan%', '-')
 
-    # --- 5. EXCEL EXPORT ---
+    with st.expander("📄 View Detailed Monthly Metrics Table", expanded=True):
+        st.dataframe(display_metrics, use_container_width=True)
+
+
+    # --- TAB 2: MONTHLY HEROES ---
+    st.divider()
+    st.subheader("🏆 Hero of the Month")
+    
+    hero_list = []
+    for m in monthly_metrics['Month_Year']:
+        m_df = master_df[master_df['Month_Year'] == m]
+        
+        # Top Product
+        top_prod = m_df.groupby('Item Description')['Revenue'].sum().idxmax()
+        top_prod_rev = m_df.groupby('Item Description')['Revenue'].sum().max()
+        
+        # Top State
+        top_state = m_df.groupby('Final State')['Revenue'].sum().idxmax()
+        
+        # Top Channel Split
+        b2b_share = m_df[m_df['Channel'] == 'B2B']['Revenue'].sum() / m_df['Revenue'].sum()
+        
+        hero_list.append({
+            'Month': m,
+            '👑 Top Product': top_prod[:40] + '...',
+            'Product Rev': f"₹{top_prod_rev:,.0f}",
+            '🌍 Top State': top_state,
+            '🏢 B2B Share': f"{b2b_share:.0%}"
+        })
+        
+    st.dataframe(pd.DataFrame(hero_list), use_container_width=True)
+
+
+    # --- TAB 3: REGIONAL & BRAND PERFORMANCE ---
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.subheader("🌍 Revenue Heatmap by Region")
+        latest_month = sorted_files[-1]['date'].strftime('%b-%Y')
+        latest_df = master_df[master_df['Month_Year'] == latest_month]
+        
+        reg_fig = px.sunburst(
+            latest_df, path=['Region', 'Final State'], values='Revenue',
+            title=f"Regional Breakdown ({latest_month})"
+        )
+        st.plotly_chart(reg_fig, use_container_width=True)
+        
+    with c2:
+        st.subheader("📦 Pareto Analysis (80/20 Rule)")
+        # Calculate Product Contribution
+        prod_perf = master_df.groupby('Item Description')['Revenue'].sum().sort_values(ascending=False).reset_index()
+        prod_perf['Cumulative %'] = 100 * prod_perf['Revenue'].cumsum() / prod_perf['Revenue'].sum()
+        
+        # Cutoff for top 20 products
+        top_20_prods = prod_perf.head(20)
+        
+        pareto_fig = px.bar(
+            top_20_prods, x='Item Description', y='Revenue',
+            title="Top 20 Products Contributing to Revenue (All Time)",
+            text_auto='.2s'
+        )
+        # Add cumulative line
+        pareto_fig.add_scatter(x=top_20_prods['Item Description'], y=top_20_prods['Cumulative %'], yaxis='y2', name='Cumulative %', line=dict(color='red'))
+        pareto_fig.update_layout(yaxis2=dict(overlaying='y', side='right', range=[0, 100]))
+        pareto_fig.update_xaxes(showticklabels=False) # Hide messy labels
+        st.plotly_chart(pareto_fig, use_container_width=True)
+
+
+    # ==========================================
+    # 5. EXCEL EXPORT
+    # ==========================================
     output = io.BytesIO()
     writer = pd.ExcelWriter(output, engine='xlsxwriter')
     workbook = writer.book
     
-    # Styles
+    # Formats
     header_fmt = workbook.add_format({'bold': True, 'fg_color': '#203764', 'font_color': '#FFFFFF', 'border': 1})
-    currency_fmt = workbook.add_format({'num_format': '[$₹-4009]#,##0', 'border': 1})
-    pct_fmt = workbook.add_format({'num_format': '0.0%', 'border': 1})
-    green_text = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE', 'num_format': '0.0%', 'border': 1})
-    red_text = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE', 'num_format': '0.0%', 'border': 1})
-
-    def write_sheet_beautified(df, sheet_name):
-        df_export = df.copy()
-        if isinstance(df_export.columns, pd.MultiIndex):
-            df_export.columns = [' - '.join(map(str, col)).strip() for col in df_export.columns.values]
-        df_export = df_export.reset_index()
-        
-        df_export.to_excel(writer, sheet_name=sheet_name, startrow=1, header=False, index=False)
-        ws = writer.sheets[sheet_name]
-        
-        # Headers
-        for col_num, value in enumerate(df_export.columns.values):
-            ws.write(0, col_num, value, header_fmt)
-            ws.set_column(col_num, col_num, 20)
-            
-        # Formats
-        for i, col in enumerate(df_export.columns):
-            if any(x in col for x in ['Revenue', 'Average', 'Projected', 'Std_Dev']):
-                ws.set_column(i, i, 18, currency_fmt)
-            elif 'Growth' in col or 'Share' in col:
-                ws.set_column(i, i, 12, pct_fmt)
-                ws.conditional_format(1, i, len(df_export), i, {'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_text})
-                ws.conditional_format(1, i, len(df_export), i, {'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_text})
+    money_fmt = workbook.add_format({'num_format': '₹#,##0'})
     
-    write_sheet_beautified(region_stats, 'Regional Dashboard')
-    write_sheet_beautified(state_stats, 'State Insights')
-    write_sheet_beautified(city_stats, 'City Insights')
-    write_sheet_beautified(product_stats.head(50), 'Top 50 Products')
-    write_sheet_beautified(product_stats, 'All Products')
-    if not ai_df.empty:
-        ai_df.to_excel(writer, sheet_name='AI Insights', index=False)
-
+    # 1. Summary Sheet
+    monthly_metrics.to_excel(writer, sheet_name='Executive Summary', index=False)
+    
+    # 2. Regional Data
+    reg_pivot = master_df.pivot_table(index='Region', columns='Month_Year', values='Revenue', aggfunc='sum').fillna(0)
+    reg_pivot.to_excel(writer, sheet_name='Regional Trends')
+    
+    # 3. Product Data
+    prod_pivot = master_df.pivot_table(index='Item Description', columns='Month_Year', values='Revenue', aggfunc='sum').fillna(0)
+    prod_pivot['Total'] = prod_pivot.sum(axis=1)
+    prod_pivot.sort_values('Total', ascending=False).head(100).to_excel(writer, sheet_name='Top 100 Products')
+    
     writer.close()
     output.seek(0)
     
     st.download_button(
-        label="📥 Download AI Analysis Report (.xlsx)",
-        data=output,
-        file_name=f"Amazon_AI_Report_{latest_month}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        "📥 Download Management Report", output, 
+        f"Amazon_Executive_Report_{latest_month}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
